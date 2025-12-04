@@ -472,7 +472,10 @@ async def open_server_tab():
         server_list.append(a.attr('href'))
     if not server_list:
         capture_screenshot(f"serverlist_overview.png")
-        error_exit("⚠️ server_list 为空，跳过服务器续期流程")
+        server_list.append('https://dash.zampto.net/server?id=1715')
+        server_list.append('https://dash.zampto.net/server?id=1716')
+        print("⚠️ server_list 为空，继续使用默认配置续期")
+        # error_exit("⚠️ server_list 为空，跳过服务器续期流程")
     std_logger.info(f"待续期服务器：{server_list}")
     for s in server_list:
         page.get(s)
