@@ -566,8 +566,8 @@ async def continue_execution(current_url: str = ""):
             
             # 截图记录
             screenshot_name = f"{step_name}_{i}.png"
-            # if start_index!=2:
-            capture_screenshot(screenshot_name)
+            if i!=1:
+                capture_screenshot(screenshot_name)
             
             # 给截图一点时间
             if i < len(steps) - 1:  # 不是最后一步
