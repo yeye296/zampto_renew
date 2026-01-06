@@ -29,14 +29,6 @@ jobs:
             echo "✅ CHROME_PROXY 已设置"
           fi
 
-      - name: Setup WARP
-        continue-on-error: true
-        timeout-minutes: 5
-        uses: fscarmen/warp-on-actions@v1.4
-        with:
-          stack: dual
-          mode: wireguard
-
       - name: 执行 Zampto Renew 容器
         run: |
           docker run -i \
