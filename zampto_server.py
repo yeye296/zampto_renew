@@ -298,7 +298,8 @@ def setup_proxy():
     pava=is_proxy_available(chrome_proxy)
     if chrome_proxy and pava:
         std_logger.info(f"✅ 代理可用，添加到启动参数: {chrome_proxy}")
-        options.set_argument(f'--proxy-server={chrome_proxy}')
+        options.set_proxy(chrome_proxy)
+        # options.set_argument(f'--proxy-server={chrome_proxy}')
     elif chrome_proxy and not pava:
         error_exit("❌ 指定代理不可用，为了保证账号安全退出不进入下一步操作。")
     else:
