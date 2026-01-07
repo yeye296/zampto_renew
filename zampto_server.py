@@ -295,15 +295,16 @@ def attach_browser(port=9222):
     except Exception as e:
         print(f"⚠️ 接管浏览器时出错：{e}")
         return None
-
+        
 def setup_proxy():
     global options
     
+    # 隐私保护：不打印具体信息
     if not chrome_proxy:
-        print("未检测到可用代理配置，直接启动浏览器")
+        std_logger.info("未检测到代理配置，直连模式启动")
         return
 
-    # 1. 解析代理字符串
+    # 1. 解析代理字符串 (http://user:pass@ip:port)
     try:
         # 去掉协议头
         proxy_str = chrome_proxy.replace('http://', '').replace('https://', '')
@@ -312,35 +313,37 @@ def setup_proxy():
             auth_part, ip_part = proxy_str.rsplit('@', 1)
             username, password = auth_part.split(':', 1)
             ip, port = ip_part.split(':')
+            
+            # 【关键修改 1】使用原生参数设置代理服务器地址
+            # 这比插件设置更稳定，确保一开始就走代理
+            options.set_argument(f'--proxy-server=http://{ip}:{port}')
+            
+            std_logger.info("✅ 检测到认证代理，已配置连接参数与认证插件")
         else:
+            # 无账号密码情况
             options.set_argument(f'--proxy-server={chrome_proxy}')
-            std_logger.info(f"✅ 代理可用(无认证)，添加到启动参数: {chrome_proxy}")
+            std_logger.info("✅ 检测到普通代理，已配置连接参数")
             return
 
-        std_logger.info(f"✅ 代理可用(含认证)，正在生成验证插件文件夹: {ip}:{port}")
-
     except Exception as e:
-        error_exit(f"❌ 代理字符串解析失败: {e}")
+        # 隐私保护：报错时不打印原始字符串
+        error_exit(f"❌ 代理配置解析异常，请检查格式")
         return
 
     # 2. 定义插件文件夹路径
     plugin_path = os.path.abspath("proxy_auth_plugin")
-    
-    # 如果文件夹不存在则创建
     if not os.path.exists(plugin_path):
         os.makedirs(plugin_path)
 
     # 3. 准备文件内容
+    # Manifest V2 (依然是自动化测试中最稳定的版本)
     manifest_json = """
     {
         "version": "1.0.0",
         "manifest_version": 2,
-        "name": "Chrome Proxy",
+        "name": "Chrome Proxy Auth",
         "permissions": [
-            "proxy",
             "tabs",
-            "unlimitedStorage",
-            "storage",
             "<all_urls>",
             "webRequest",
             "webRequestBlocking"
@@ -352,22 +355,9 @@ def setup_proxy():
     }
     """
 
-    # 使用 json.dumps 安全处理特殊字符
+    # 【关键修改 2】background.js 只负责填密码，不负责设置 IP
+    # 这样避免了插件设置代理失败导致直连的问题
     background_js = """
-    var config = {
-            mode: "fixed_servers",
-            rules: {
-              singleProxy: {
-                scheme: "http",
-                host: "%s",
-                port: parseInt(%s)
-              },
-              bypassList: ["localhost"]
-            }
-          };
-
-    chrome.proxy.settings.set({value: config, scope: "regular"}, function() {});
-
     function callbackFn(details) {
         return {
             authCredentials: {
@@ -382,25 +372,21 @@ def setup_proxy():
                 {urls: ["<all_urls>"]},
                 ['blocking']
     );
-    """ % (ip, port, json.dumps(username), json.dumps(password))
+    """ % (json.dumps(username), json.dumps(password))
 
-    # 4. 将文件写入文件夹（而不是 zip）
+    # 4. 写入插件文件
     try:
-        # 写入 manifest.json
         with open(os.path.join(plugin_path, "manifest.json"), 'w', encoding='utf-8') as f:
             f.write(manifest_json)
             
-        # 写入 background.js
         with open(os.path.join(plugin_path, "background.js"), 'w', encoding='utf-8') as f:
             f.write(background_js)
         
-        # 5. 加载插件文件夹
+        # 5. 加载插件
         options.add_extension(plugin_path)
         
-        std_logger.info(f"✅ 代理插件已加载: {plugin_path}")
-        
     except Exception as e:
-        error_exit(f"❌ 生成代理插件文件失败: {e}")
+        error_exit(f"❌ 代理插件生成失败")
         
 async def is_page_crashed(browser):
     async def check_title():
