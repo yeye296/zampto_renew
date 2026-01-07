@@ -295,7 +295,7 @@ def attach_browser(port=9222):
     except Exception as e:
         print(f"⚠️ 接管浏览器时出错：{e}")
         return None
-        
+
 def setup_proxy():
     global options
     
@@ -304,32 +304,33 @@ def setup_proxy():
         return
 
     # 1. 解析代理字符串
-    # 格式示例: http://user:pass@host:port
     try:
-        # 去掉协议头 http://
+        # 去掉协议头
         proxy_str = chrome_proxy.replace('http://', '').replace('https://', '')
         
-        # 从最后一个 @ 分割，右边是 ip:port，左边是 user:pass
         if '@' in proxy_str:
             auth_part, ip_part = proxy_str.rsplit('@', 1)
             username, password = auth_part.split(':', 1)
             ip, port = ip_part.split(':')
         else:
-            # 没有账号密码的情况
             options.set_argument(f'--proxy-server={chrome_proxy}')
             std_logger.info(f"✅ 代理可用(无认证)，添加到启动参数: {chrome_proxy}")
             return
 
-        std_logger.info(f"✅ 代理可用(含认证)，正在生成验证插件: {ip}:{port}")
+        std_logger.info(f"✅ 代理可用(含认证)，正在生成验证插件文件夹: {ip}:{port}")
 
     except Exception as e:
         error_exit(f"❌ 代理字符串解析失败: {e}")
         return
 
-    # 2. 创建 Chrome 代理验证插件 (Extension)
-    # 这种方式可以完美解决特殊字符(如!)的问题，也绕过了浏览器的弹窗
-    plugin_file = 'proxy_auth_plugin.zip'
+    # 2. 定义插件文件夹路径
+    plugin_path = os.path.abspath("proxy_auth_plugin")
+    
+    # 如果文件夹不存在则创建
+    if not os.path.exists(plugin_path):
+        os.makedirs(plugin_path)
 
+    # 3. 准备文件内容
     manifest_json = """
     {
         "version": "1.0.0",
@@ -351,7 +352,7 @@ def setup_proxy():
     }
     """
 
-    # 使用 json.dumps 确保密码中的特殊字符（如 ! ) @）被正确转义，不会破坏 JS 语法
+    # 使用 json.dumps 安全处理特殊字符
     background_js = """
     var config = {
             mode: "fixed_servers",
@@ -383,19 +384,23 @@ def setup_proxy():
     );
     """ % (ip, port, json.dumps(username), json.dumps(password))
 
-    # 3. 将配置写入 zip 文件
+    # 4. 将文件写入文件夹（而不是 zip）
     try:
-        with zipfile.ZipFile(plugin_file, 'w') as zp:
-            zp.writestr("manifest.json", manifest_json)
-            zp.writestr("background.js", background_js)
+        # 写入 manifest.json
+        with open(os.path.join(plugin_path, "manifest.json"), 'w', encoding='utf-8') as f:
+            f.write(manifest_json)
+            
+        # 写入 background.js
+        with open(os.path.join(plugin_path, "background.js"), 'w', encoding='utf-8') as f:
+            f.write(background_js)
         
-        # 4. 加载插件
-        options.add_extension(os.path.abspath(plugin_file))
+        # 5. 加载插件文件夹
+        options.add_extension(plugin_path)
         
-        # 注意：使用插件方式后，不需要再设置 --proxy-server 参数，插件会接管代理设置
+        std_logger.info(f"✅ 代理插件已加载: {plugin_path}")
         
     except Exception as e:
-        error_exit(f"❌ 生成代理插件失败: {e}")
+        error_exit(f"❌ 生成代理插件文件失败: {e}")
         
 async def is_page_crashed(browser):
     async def check_title():
