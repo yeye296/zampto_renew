@@ -13,6 +13,8 @@ from time import sleep
 from functools import wraps
 import argparse
 import socket
+import zipfile
+import json
 
 def signal_handler(sig, frame):
     print("\n捕捉到 Ctrl+C，正在退出...")
@@ -293,17 +295,107 @@ def attach_browser(port=9222):
     except Exception as e:
         print(f"⚠️ 接管浏览器时出错：{e}")
         return None
+        
 def setup_proxy():
     global options
-    pava=is_proxy_available(chrome_proxy)
-    if chrome_proxy and pava:
-        std_logger.info(f"✅ 代理可用，添加到启动参数: {chrome_proxy}")
-        options.set_proxy(chrome_proxy)
-        # options.set_argument(f'--proxy-server={chrome_proxy}')
-    elif chrome_proxy and not pava:
-        error_exit("❌ 指定代理不可用，为了保证账号安全退出不进入下一步操作。")
-    else:
-        print("未检测到可用代理，直接启动浏览器")
+    
+    if not chrome_proxy:
+        print("未检测到可用代理配置，直接启动浏览器")
+        return
+
+    # 1. 解析代理字符串
+    # 格式示例: http://user:pass@host:port
+    try:
+        # 去掉协议头 http://
+        proxy_str = chrome_proxy.replace('http://', '').replace('https://', '')
+        
+        # 从最后一个 @ 分割，右边是 ip:port，左边是 user:pass
+        if '@' in proxy_str:
+            auth_part, ip_part = proxy_str.rsplit('@', 1)
+            username, password = auth_part.split(':', 1)
+            ip, port = ip_part.split(':')
+        else:
+            # 没有账号密码的情况
+            options.set_argument(f'--proxy-server={chrome_proxy}')
+            std_logger.info(f"✅ 代理可用(无认证)，添加到启动参数: {chrome_proxy}")
+            return
+
+        std_logger.info(f"✅ 代理可用(含认证)，正在生成验证插件: {ip}:{port}")
+
+    except Exception as e:
+        error_exit(f"❌ 代理字符串解析失败: {e}")
+        return
+
+    # 2. 创建 Chrome 代理验证插件 (Extension)
+    # 这种方式可以完美解决特殊字符(如!)的问题，也绕过了浏览器的弹窗
+    plugin_file = 'proxy_auth_plugin.zip'
+
+    manifest_json = """
+    {
+        "version": "1.0.0",
+        "manifest_version": 2,
+        "name": "Chrome Proxy",
+        "permissions": [
+            "proxy",
+            "tabs",
+            "unlimitedStorage",
+            "storage",
+            "<all_urls>",
+            "webRequest",
+            "webRequestBlocking"
+        ],
+        "background": {
+            "scripts": ["background.js"]
+        },
+        "minimum_chrome_version":"22.0.0"
+    }
+    """
+
+    # 使用 json.dumps 确保密码中的特殊字符（如 ! ) @）被正确转义，不会破坏 JS 语法
+    background_js = """
+    var config = {
+            mode: "fixed_servers",
+            rules: {
+              singleProxy: {
+                scheme: "http",
+                host: "%s",
+                port: parseInt(%s)
+              },
+              bypassList: ["localhost"]
+            }
+          };
+
+    chrome.proxy.settings.set({value: config, scope: "regular"}, function() {});
+
+    function callbackFn(details) {
+        return {
+            authCredentials: {
+                username: %s,
+                password: %s
+            }
+        };
+    }
+
+    chrome.webRequest.onAuthRequired.addListener(
+                callbackFn,
+                {urls: ["<all_urls>"]},
+                ['blocking']
+    );
+    """ % (ip, port, json.dumps(username), json.dumps(password))
+
+    # 3. 将配置写入 zip 文件
+    try:
+        with zipfile.ZipFile(plugin_file, 'w') as zp:
+            zp.writestr("manifest.json", manifest_json)
+            zp.writestr("background.js", background_js)
+        
+        # 4. 加载插件
+        options.add_extension(os.path.abspath(plugin_file))
+        
+        # 注意：使用插件方式后，不需要再设置 --proxy-server 参数，插件会接管代理设置
+        
+    except Exception as e:
+        error_exit(f"❌ 生成代理插件失败: {e}")
         
 async def is_page_crashed(browser):
     async def check_title():
