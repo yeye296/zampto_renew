@@ -1,12 +1,12 @@
 name: Zampto Renew
 
 on:
-  workflow_dispatch:  # 手动触发
+  workflow_dispatch:
   schedule:
-    - cron: '5 4 * * *'  
+    - cron: '5 4 * * *'
 
 permissions:
-  contents: write # 授予工作流写入仓库内容的权限
+  contents: write
 
 jobs:
   run-zampto:
@@ -16,41 +16,64 @@ jobs:
       - name: 拉取代码
         uses: actions/checkout@v4
 
-      - name: 检查 Secrets 是否设置
+      - name: 检查 Secrets
         run: |
           if [ -z "${{ secrets.USERNAME }}" ] || [ -z "${{ secrets.PASSWORD }}" ]; then
             echo "❌ USERNAME 或 PASSWORD 未设置，终止执行。"
             exit 1
           fi
-          echo "✅ 账号信息已设置"
-          if [ -z "${{ secrets.CHROME_PROXY }}" ]; then
-            echo "⚠️ CHROME_PROXY 未设置"
-          else
-            echo "✅ CHROME_PROXY 已设置"
-          fi
+
+      # ========================================================
+      # 🚀 核心修改：安装并启动 Gost 本地代理转发
+      # ========================================================
+      - name: 启动本地代理转发 (Gost)
+        if: ${{ secrets.CHROME_PROXY != '' }}
+        env:
+          UPSTREAM_PROXY: ${{ secrets.CHROME_PROXY }}
+        run: |
+          echo "🌐 正在安装 Gost 代理工具..."
+          # 下载 gost (Linux amd64)
+          wget -q https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
+          gunzip gost-linux-amd64-2.11.5.gz
+          mv gost-linux-amd64-2.11.5 gost
+          chmod +x gost
+          
+          echo "🔄 启动 Gost 转发服务..."
+          # -L=:8888  -> 监听本地 8888 端口
+          # -F=...    -> 转发给上游带密码的代理
+          # nohup &   -> 后台运行
+          nohup ./gost -L=:8888 -F="$UPSTREAM_PROXY" > /dev/null 2>&1 &
+          
+          # 等待2秒确保启动成功
+          sleep 2
+          echo "✅ 本地代理已启动: http://127.0.0.1:8888"
 
       - name: 执行 Zampto Renew 容器
-        # 1. 在这里将 secrets 映射为环境变量
         env:
           USERNAME: ${{ secrets.USERNAME }}
           PASSWORD: ${{ secrets.PASSWORD }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_USERID: ${{ secrets.TG_USERID }}
-          CHROME_PROXY: ${{ secrets.CHROME_PROXY }}
+          # ⚠️ 注意：这里根据是否有代理，决定传本地地址还是空值
+          # 如果 secrets.CHROME_PROXY 不为空，则传本地转换后的地址，否则传空
+          FINAL_PROXY: ${{ secrets.CHROME_PROXY != '' && 'http://127.0.0.1:8888' || '' }}
         run: |
-          # 2. 在命令中使用 "$VAR" 的方式引用，Bash 就能正确处理特殊字符了
+          # ⚠️ 关键参数：--network host
+          # 这使得容器可以直接访问 Runner 上的 127.0.0.1:8888
+          
           docker run -i \
+            --network host \
             -e USERNAME="$USERNAME" \
             -e PASSWORD="$PASSWORD" \
             -e TG_TOKEN="$TG_TOKEN" \
             -e TG_USERID="$TG_USERID" \
-            -e CHROME_PROXY="$CHROME_PROXY" \
+            -e CHROME_PROXY="$FINAL_PROXY" \
             -v ${{ github.workspace }}/zampto_server.py:/app/zampto_server.py \
             -v ${{ github.workspace }}/requirements.txt:/app/requirements.txt \
             -v ${{ github.workspace }}/screenshots:/app/screenshots \
             ghcr.io/liveqte/zampto_renew:latest
 
-      # --- 新增的防暂停代码开始 ---
+      # --- 防暂停代码 ---
       - name: Commit time.txt to repo
         if: success()
         env:
@@ -58,24 +81,18 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # 如果 time.txt 不存在，说明是第一次运行
           if [ ! -f time.txt ]; then
             echo "首次生成时间：$(date +'%Y-%m-%d %H:%M:%S')" > time.txt
           else
             echo "$(date +'%Y-%m-%d %H:%M:%S')" > time.txt
           fi
-          
           git add time.txt
-          
-          # 如果有更改再提交
           if git diff --cached --quiet; then
             echo "无变化，无需提交"
           else
             git commit -m "⏱️ 更新时间文件: $(date +'%Y-%m-%d %H:%M:%S')"
             git push origin HEAD:main
           fi
-      # --- 新增的防暂停代码结束 ---
 
       - name: 上传截图产物
         if: always()
