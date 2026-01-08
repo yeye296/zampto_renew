@@ -1,9 +1,9 @@
 name: Zampto Renew
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:      # 允许手动点击按钮触发
   schedule:
-    - cron: '5 4 * * *'
+    - cron: '5 4 * * *'   # 每天凌晨自动运行
 
 permissions:
   contents: write
@@ -16,51 +16,64 @@ jobs:
       - name: 拉取代码
         uses: actions/checkout@v4
 
-      - name: 检查 Secrets
+      # ----------------------------------------------------------------
+      # 1. 环境检查与 Gost 代理服务启动
+      # ----------------------------------------------------------------
+      - name: 准备代理环境
+        id: proxy-setup
+        env:
+          RAW_PROXY: ${{ secrets.CHROME_PROXY }}
         run: |
-          if [ -z "${{ secrets.USERNAME }}" ] || [ -z "${{ secrets.PASSWORD }}" ]; then
-            echo "❌ USERNAME 或 PASSWORD 未设置，终止执行。"
+          # 检查是否设置了代理
+          if [ -z "$RAW_PROXY" ]; then
+            echo "ℹ️ 未配置 CHROME_PROXY，将使用直连模式。"
+            echo "USE_LOCAL_PROXY=false" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          echo "🌐 检测到代理配置，正在安装 Gost..."
+          
+          # 下载并安装 Gost
+          wget -q -O gost.gz https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
+          gunzip gost.gz
+          chmod +x gost
+          
+          # 启动后台转发: 监听 8888 -> 转发给 secrets 中的代理
+          nohup ./gost -L=:8888 -F="$RAW_PROXY" > /dev/null 2>&1 &
+          
+          # 等待服务就绪
+          sleep 3
+          
+          # 简单测试一下端口是否通
+          if nc -z 127.0.0.1 8888; then
+            echo "✅ 本地代理服务启动成功: 127.0.0.1:8888"
+            echo "USE_LOCAL_PROXY=true" >> $GITHUB_ENV
+          else
+            echo "❌ Gost 启动失败，端口未开放。"
             exit 1
           fi
 
-      # ========================================================
-      # 🚀 核心修改：安装并启动 Gost 本地代理转发
-      # ========================================================
-      - name: 启动本地代理转发 (Gost)
-        if: ${{ secrets.CHROME_PROXY != '' }}
-        env:
-          UPSTREAM_PROXY: ${{ secrets.CHROME_PROXY }}
-        run: |
-          echo "🌐 正在安装 Gost 代理工具..."
-          # 下载 gost (Linux amd64)
-          wget -q https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
-          gunzip gost-linux-amd64-2.11.5.gz
-          mv gost-linux-amd64-2.11.5 gost
-          chmod +x gost
-          
-          echo "🔄 启动 Gost 转发服务..."
-          # -L=:8888  -> 监听本地 8888 端口
-          # -F=...    -> 转发给上游带密码的代理
-          # nohup &   -> 后台运行
-          nohup ./gost -L=:8888 -F="$UPSTREAM_PROXY" > /dev/null 2>&1 &
-          
-          # 等待2秒确保启动成功
-          sleep 2
-          echo "✅ 本地代理已启动: http://127.0.0.1:8888"
-
+      # ----------------------------------------------------------------
+      # 2. 运行 Python 脚本容器
+      # ----------------------------------------------------------------
       - name: 执行 Zampto Renew 容器
         env:
           USERNAME: ${{ secrets.USERNAME }}
           PASSWORD: ${{ secrets.PASSWORD }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_USERID: ${{ secrets.TG_USERID }}
-          # ⚠️ 注意：这里根据是否有代理，决定传本地地址还是空值
-          # 如果 secrets.CHROME_PROXY 不为空，则传本地转换后的地址，否则传空
-          FINAL_PROXY: ${{ secrets.CHROME_PROXY != '' && 'http://127.0.0.1:8888' || '' }}
         run: |
+          # 动态决定传给容器的代理地址
+          if [ "$USE_LOCAL_PROXY" == "true" ]; then
+            FINAL_PROXY="http://127.0.0.1:8888"
+            echo "🚀 容器将使用本地转发代理: $FINAL_PROXY"
+          else
+            FINAL_PROXY=""
+            echo "🚀 容器将使用直连模式"
+          fi
+
           # ⚠️ 关键参数：--network host
-          # 这使得容器可以直接访问 Runner 上的 127.0.0.1:8888
-          
+          # 这让容器共享 Runner 的网络栈，从而能访问 localhost:8888
           docker run -i \
             --network host \
             -e USERNAME="$USERNAME" \
@@ -73,24 +86,28 @@ jobs:
             -v ${{ github.workspace }}/screenshots:/app/screenshots \
             ghcr.io/liveqte/zampto_renew:latest
 
-      # --- 防暂停代码 ---
-      - name: Commit time.txt to repo
+      # ----------------------------------------------------------------
+      # 3. 防暂停机制 (提交时间文件)
+      # ----------------------------------------------------------------
+      - name: 提交运行日志防暂停
         if: success()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          
           if [ ! -f time.txt ]; then
-            echo "首次生成时间：$(date +'%Y-%m-%d %H:%M:%S')" > time.txt
+            echo "Init: $(date +'%Y-%m-%d %H:%M:%S')" > time.txt
           else
-            echo "$(date +'%Y-%m-%d %H:%M:%S')" > time.txt
+            echo "Update: $(date +'%Y-%m-%d %H:%M:%S')" > time.txt
           fi
+          
           git add time.txt
           if git diff --cached --quiet; then
-            echo "无变化，无需提交"
+            echo "无变化"
           else
-            git commit -m "⏱️ 更新时间文件: $(date +'%Y-%m-%d %H:%M:%S')"
+            git commit -m "⏱️ Auto-update timestamp"
             git push origin HEAD:main
           fi
 
