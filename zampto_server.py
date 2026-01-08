@@ -242,11 +242,16 @@ def tg_notifacation(meg):
 
 
 def setup(user_agent: str, user_data_path: str = None):
+    """
+    初始化浏览器
+    
+    ⚠️ 重要：使用代理认证时，不要使用 incognito(True)
+    """
     global options
-    global page,browser
+    global page, browser
+    
     options = (
         ChromiumOptions()
-        # .incognito(True)
         .set_user_agent(user_agent)
         .set_argument('--guest')
         .set_argument('--no-sandbox')
@@ -255,32 +260,64 @@ def setup(user_agent: str, user_data_path: str = None):
         .set_argument('--remote-debugging-port=9222')
         .set_browser_path(binpath)
     )
+    
+    # 无头模式配置
     if 'DISPLAY' not in os.environ:
         options.headless(True)
-        options.set_argument('--headless=new') 
-        std_logger.info("✅ DISPLAY环境变量为空，浏览器使用无头模式")
+        options.set_argument('--headless=new')
+        std_logger.info("✅ 浏览器使用无头模式")
     else:
         options.headless(False)
-        std_logger.info("✅ DISPLAY环境变量存在，浏览器使用正常模式")
-    if user_data_path:
-        options.set_user_data_path(user_data_path)
-        
-    # 配置代理并获取插件路径
+        std_logger.info("✅ 浏览器使用正常模式")
+    
+    # ⚠️ 关键修复：配置代理（先设置，再获取插件路径）
     plugin_path = setup_proxy()
     
     # 如果有代理认证插件，加载它
     if plugin_path:
+        # 使用正确的方式加载扩展
         options.add_extension(path=plugin_path)
-        std_logger.info(f"✅ 已加载代理认证扩展: {plugin_path}")
-
-    # 创建 Chromium 浏览器对象
-    browser = attach_browser()
-    if browser is None or not browser.states.is_alive:
-        # 接管失败，启动新浏览器
+        std_logger.info("✅ 代理认证扩展已加载")
+        
+        # 代理认证模式下，不要接管已有浏览器，必须启动新浏览器
+        std_logger.info("⚠️ 使用代理认证时，将启动全新浏览器实例")
+        
+        if user_data_path:
+            std_logger.warning("⚠️ 代理认证模式下不建议使用 user_data_path")
+        
+        # 直接启动新浏览器
         browser = Chromium(options)
-
+        std_logger.info("✅ 浏览器启动成功（代理认证模式）")
+    else:
+        # 无代理认证，可以正常设置 user_data_path 并尝试接管
+        if user_data_path:
+            options.set_user_data_path(user_data_path)
+        
+        # 尝试接管已有浏览器
+        browser = attach_browser()
+        if browser is None or not browser.states.is_alive:
+            std_logger.info("正在启动新浏览器实例...")
+            browser = Chromium(options)
+            std_logger.info("✅ 浏览器启动成功")
+    
     # 获取当前激活的标签页
     page = browser.latest_tab
+    
+    # 验证提示
+    if chrome_proxy:
+        std_logger.info("=" * 60)
+        page.get('https://api.ipify.org')
+        print(f"当前IP: {page.text}")  # 应该显示代理IP
+
+        # 方法2：详细信息
+        page.get('https://httpbin.org/ip')
+        print(page.json)  # 查看完整IP信息
+
+        # 方法3：中文网站
+        page.get('https://ip.sb')
+        print(page.text)  # 查看IP和地理位置
+        std_logger.info("=" * 60)
+    exit(1)
 
 @require_browser_alive
 async def test():
@@ -317,12 +354,11 @@ def mask_sensitive_info(text):
 
 def parse_proxy_url(proxy_url):
     """
-    解析代理URL，提取认证信息和代理地址
+    解析代理URL
     格式: http://username:password@host:port
     返回: (scheme, username, password, host, port)
     """
     try:
-        # 使用正则表达式手动解析
         pattern = r'^(https?|socks5)://([^:]+):([^@]+)@([^:]+):(\d+)$'
         match = re.match(pattern, proxy_url)
         
@@ -347,82 +383,62 @@ def parse_proxy_url(proxy_url):
             std_logger.debug(f"无认证代理解析成功 - 协议:{scheme}, 主机:{host}, 端口:{port}")
             return scheme, None, None, host, port
         
-        std_logger.error("❌ 代理URL格式不正确，应为: http://username:password@host:port")
+        std_logger.error("❌ 代理URL格式不正确")
         return None, None, None, None, None
         
     except Exception as e:
         std_logger.error(f"❌ 代理URL解析失败: {e}")
         return None, None, None, None, None
 
-def create_proxy_auth_extension(proxy_host, proxy_port, proxy_username, proxy_password, scheme='http', plugin_path=None):
+def create_proxy_auth_extension(proxy_username, proxy_password, plugin_path=None):
     """
-    创建Chrome代理认证扩展插件
-    ⚠️ 注意：此扩展在隐身模式下不会自动生效！
+    创建Chrome代理认证扩展插件（只处理认证，不设置代理地址）
+    
+    ⚠️ 关键：此扩展只处理代理认证，代理地址通过命令行参数设置
     """
     if plugin_path is None:
         plugin_path = os.path.join(tempfile.gettempdir(), 'drission_proxy_auth')
     
-    # 创建manifest.json配置（Manifest V2）
+    # Manifest V2 配置
     manifest_json = """
-    {
-        "version": "1.0.0",
-        "manifest_version": 2,
-        "name": "Proxy Auth Extension",
-        "permissions": [
-            "proxy",
-            "tabs",
-            "unlimitedStorage",
-            "storage",
-            "<all_urls>",
-            "webRequest",
-            "webRequestBlocking"
-        ],
-        "background": {
-            "scripts": ["background.js"]
-        },
-        "minimum_chrome_version":"22.0.0"
-    }
-    """
+{
+    "version": "1.0.0",
+    "manifest_version": 2,
+    "name": "Proxy Authentication",
+    "permissions": [
+        "webRequest",
+        "webRequestBlocking",
+        "<all_urls>"
+    ],
+    "background": {
+        "scripts": ["background.js"]
+    },
+    "minimum_chrome_version": "22.0.0"
+}
+"""
     
     # JavaScript字符串转义
     escaped_password = proxy_password.replace('\\', '\\\\').replace('"', '\\"').replace("'", "\\'")
     escaped_username = proxy_username.replace('\\', '\\\\').replace('"', '\\"').replace("'", "\\'")
     
-    # 创建background.js配置
+    # background.js - 只处理认证，不设置代理
     background_js = f"""
-var config = {{
-    mode: "fixed_servers",
-    rules: {{
-        singleProxy: {{
-            scheme: "{scheme}",
-            host: "{proxy_host}",
-            port: parseInt({proxy_port})
-        }},
-        bypassList: ["localhost", "127.0.0.1"]
-    }}
-}};
-
-chrome.proxy.settings.set({{value: config, scope: "regular"}}, function() {{
-    console.log("✅ Proxy settings applied: {proxy_host}:{proxy_port}");
-}});
-
-function callbackFn(details) {{
-    console.log("🔐 Proxy authentication requested for:", details.url);
-    return {{
-        authCredentials: {{
-            username: "{escaped_username}",
-            password: "{escaped_password}"
-        }}
-    }};
-}}
-
+// 代理认证处理
 chrome.webRequest.onAuthRequired.addListener(
-    callbackFn,
+    function(details) {{
+        console.log('🔐 代理认证请求:', details.url);
+        return {{
+            authCredentials: {{
+                username: "{escaped_username}",
+                password: "{escaped_password}"
+            }}
+        }};
+    }},
     {{urls: ["<all_urls>"]}},
     ['blocking']
 );
 
-console.log("✅ Proxy auth extension loaded");
+console.log('✅ 代理认证扩展已加载');
 """
     
     # 创建插件目录
@@ -443,10 +459,9 @@ def setup_proxy():
     """
     配置代理设置
     
-    ⚠️ 重要提示：
-    - 如果使用带认证的代理，必须移除 incognito(True)！
-    - Chrome 扩展在隐身模式下默认被禁用
-    - 无法通过编程方式在隐身模式下自动启用扩展
+    ⚠️ 新方案：
+    1. 通过 --proxy-server 命令行参数设置代理地址（这样代理才会真正生效）
+    2. 通过扩展处理认证
     """
     global options
     
@@ -471,27 +486,23 @@ def setup_proxy():
         std_logger.error("❌ 代理URL格式错误")
         return None
     
-    # 判断是否需要认证
+    # ⚠️ 关键改变：无论是否有认证，都通过命令行参数设置代理
+    proxy_server = f"{scheme}://{host}:{port}"
+    options.set_argument(f'--proxy-server={proxy_server}')
+    std_logger.info(f"✅ 代理地址已设置（命令行参数）: {host}:{port}")
+    
+    # 如果有认证信息，创建认证扩展
     if username and password:
-        std_logger.warning("⚠️ 检测到代理认证信息")
-        std_logger.warning("⚠️ 使用代理认证时，必须移除 incognito(True)！")
-        std_logger.warning("⚠️ Chrome 扩展在隐身模式下不会自动生效")
-        
-        # 创建代理认证扩展
+        std_logger.info("✅ 检测到代理认证信息，创建认证扩展")
         plugin_path = create_proxy_auth_extension(
-            proxy_host=host,
-            proxy_port=port,
             proxy_username=username,
-            proxy_password=password,
-            scheme=scheme
+            proxy_password=password
         )
-        std_logger.info(f"✅ 代理认证扩展已准备: {host}:{port}")
         return plugin_path
     else:
-        std_logger.info(f"✅ 无认证代理，使用命令行参数: {host}:{port}")
-        # 无认证代理可以直接使用命令行参数
-        options.set_argument(f'--proxy-server={scheme}://{host}:{port}')
+        std_logger.info("✅ 无需认证")
         return None
+
         
 async def is_page_crashed(browser):
     async def check_title():
