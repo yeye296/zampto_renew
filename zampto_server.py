@@ -306,16 +306,27 @@ def setup(user_agent: str, user_data_path: str = None):
     # 验证提示
     if chrome_proxy:
         std_logger.info("=" * 60)
+        # 方法1：访问纯文本IP网站
         page.get('https://api.ipify.org')
-        print(f"当前IP: {page.text}")  # 应该显示代理IP
+        ip_text = page.ele('tag:body').text  # 获取 body 元素的文本
+        print(f"当前IP: {ip_text}")
 
-        # 方法2：详细信息
+        # 方法2：访问JSON API
         page.get('https://httpbin.org/ip')
-        print(page.json)  # 查看完整IP信息
+        ip_info = page.ele('tag:body').text  # 获取JSON文本
+        print(f"IP信息: {ip_info}")
 
-        # 方法3：中文网站
+        # 方法3：访问HTML网站
         page.get('https://ip.sb')
-        print(page.text)  # 查看IP和地理位置
+        print(f"页面内容: {page.html}")  # 查看完整HTML
+        # 或者只获取IP文本
+        ip_element = page.ele('tag:pre')  # ip.sb 的IP显示在 pre 标签中
+        if ip_element:
+            print(f"当前IP: {ip_element.text}")
+
+        # 方法4：最简单 - 访问 ifconfig.me
+        page.get('https://ifconfig.me')
+        print(f"当前IP: {page.ele('tag:body').text}")
         std_logger.info("=" * 60)
     exit(1)
 
