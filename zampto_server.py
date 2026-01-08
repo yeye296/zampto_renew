@@ -13,9 +13,11 @@ from time import sleep
 from functools import wraps
 import argparse
 import socket
-import zipfile
 import json
 import shutil
+import string
+import tempfile
+import urllib.parse
 
 def signal_handler(sig, frame):
     print("\n捕捉到 Ctrl+C，正在退出...")
@@ -261,7 +263,15 @@ def setup(user_agent: str, user_data_path: str = None):
         std_logger.info("✅ DISPLAY环境变量存在，浏览器使用正常模式")
     if user_data_path:
         options.set_user_data_path(user_data_path)
-    setup_proxy()
+        
+    # 配置代理并获取插件路径
+    plugin_path = setup_proxy()
+    
+    # 如果有代理认证插件，加载它
+    if plugin_path:
+        options.add_extension(path=plugin_path)
+        std_logger.info(f"✅ 已加载代理认证扩展: {plugin_path}")
+
     # 创建 Chromium 浏览器对象
     browser = attach_browser()
     if browser is None or not browser.states.is_alive:
@@ -297,54 +307,48 @@ def attach_browser(port=9222):
         print(f"⚠️ 接管浏览器时出错：{e}")
         return None
         
-def setup_proxy():
-    global options
-    
-    # 隐私保护：不打印具体信息
-    if not chrome_proxy:
-        std_logger.info("未检测到代理配置，直连模式启动")
-        return
-
-    # 1. 解析代理字符串 (http://user:pass@ip:port)
+def parse_proxy_url(proxy_url):
+    """
+    解析代理URL，提取认证信息和代理地址
+    格式: http://username:password@host:port
+    返回: (scheme, username, password, host, port)
+    """
     try:
-        # 兼容 http:// 和无协议头的情况
-        proxy_clean = chrome_proxy.replace('http://', '').replace('https://', '')
+        parsed = urllib.parse.urlparse(proxy_url)
+        scheme = parsed.scheme or 'http'
+        username = parsed.username or ''
+        password = parsed.password or ''
+        host = parsed.hostname
+        port = parsed.port or 8080
         
-        if '@' in proxy_clean:
-            auth_part, ip_part = proxy_clean.rsplit('@', 1)
-            username, password = auth_part.split(':', 1)
-            ip, port = ip_part.split(':')
-            
-            # 【核心策略 1】使用命令行参数强制流量走代理服务器
-            # 这样可以防止插件加载延迟导致的直连漏网之鱼
-            options.set_argument(f'--proxy-server=http://{ip}:{port}')
-            
-            std_logger.info("✅ 检测到认证代理，已配置连接参数与认证插件")
-        else:
-            # 无账号密码情况，直接设置参数即可
-            options.set_argument(f'--proxy-server={chrome_proxy}')
-            std_logger.info("✅ 检测到普通代理，已配置连接参数")
-            return
-
+        return scheme, username, password, host, port
     except Exception as e:
-        error_exit(f"❌ 代理配置解析异常，请检查格式")
-        return
+        std_logger.error(f"❌ 代理URL解析失败: {e}")
+        return None, None, None, None, None
 
-    # 2. 定义插件文件夹路径 (使用绝对路径)
-    plugin_path = os.path.abspath("proxy_auth_plugin")
+def create_proxy_auth_extension(proxy_host, proxy_port, proxy_username, proxy_password, scheme='http', plugin_path=None):
+    """
+    创建Chrome代理认证扩展插件
+    参数:
+        proxy_host: 代理服务器地址
+        proxy_port: 代理服务器端口
+        proxy_username: 代理用户名
+        proxy_password: 代理密码
+        scheme: 代理协议 (http/https/socks5)
+        plugin_path: 插件保存路径，默认使用临时目录
+    返回:
+        插件目录路径
+    """
+    if plugin_path is None:
+        # 使用临时目录
+        plugin_path = os.path.join(tempfile.gettempdir(), 'drission_proxy_auth')
     
-    # 清理旧的插件文件夹，防止残留文件干扰
-    if os.path.exists(plugin_path):
-        shutil.rmtree(plugin_path)
-    os.makedirs(plugin_path)
-
-    # 3. 准备 Manifest.json (Manifest V2)
-    # 這是目前 Headless 模式下最稳定的版本
+    # 创建manifest.json配置
     manifest_json = """
     {
         "version": "1.0.0",
         "manifest_version": 2,
-        "name": "Chrome Proxy Auth",
+        "name": "Proxy Auth Extension",
         "permissions": [
             "proxy",
             "tabs",
@@ -360,54 +364,109 @@ def setup_proxy():
         "minimum_chrome_version":"22.0.0"
     }
     """
-
-    # 4. 准备 background.js
-    # 仅负责监听认证请求并填入密码
-    background_js = """
-    var config = {
+    
+    # 创建background.js配置
+    background_js = string.Template(
+        """
+        var config = {
             mode: "fixed_servers",
             rules: {
-              singleProxy: {
-                scheme: "http",
-                host: "%s",
-                port: parseInt(%s)
-              },
-              bypassList: ["localhost"]
-            }
-          };
-
-    // 虽然命令行设置了代理，但插件再次设置可以确保双重保险
-    chrome.proxy.settings.set({value: config, scope: "regular"}, function() {});
-
-    function callbackFn(details) {
-        return {
-            authCredentials: {
-                username: %s,
-                password: %s
+                singleProxy: {
+                    scheme: "${scheme}",
+                    host: "${host}",
+                    port: parseInt(${port})
+                },
+                bypassList: ["localhost", "127.0.0.1"]
             }
         };
-    }
 
-    chrome.webRequest.onAuthRequired.addListener(
-                callbackFn,
-                {urls: ["<all_urls>"]},
-                ['blocking']
-    );
-    """ % (ip, port, json.dumps(username), json.dumps(password))
+        chrome.proxy.settings.set({value: config, scope: "regular"}, function() {
+            console.log("Proxy settings applied");
+        });
 
-    # 5. 写入文件
-    try:
-        with open(os.path.join(plugin_path, "manifest.json"), 'w', encoding='utf-8') as f:
-            f.write(manifest_json)
-            
-        with open(os.path.join(plugin_path, "background.js"), 'w', encoding='utf-8') as f:
-            f.write(background_js)
-        
-        # 6. 加载插件
-        options.add_extension(plugin_path)
-        
-    except Exception as e:
-        error_exit(f"❌ 代理插件生成失败")
+        function callbackFn(details) {
+            return {
+                authCredentials: {
+                    username: "${username}",
+                    password: "${password}"
+                }
+            };
+        }
+
+        chrome.webRequest.onAuthRequired.addListener(
+            callbackFn,
+            {urls: ["<all_urls>"]},
+            ['blocking']
+        );
+        """
+    ).substitute(
+        host=proxy_host,
+        port=proxy_port,
+        username=proxy_username,
+        password=proxy_password,
+        scheme=scheme,
+    )
+    
+    # 创建插件目录
+    os.makedirs(plugin_path, exist_ok=True)
+    
+    # 写入manifest.json
+    manifest_path = os.path.join(plugin_path, "manifest.json")
+    with open(manifest_path, "w", encoding='utf-8') as f:
+        f.write(manifest_json)
+    
+    # 写入background.js
+    background_path = os.path.join(plugin_path, "background.js")
+    with open(background_path, "w", encoding='utf-8') as f:
+        f.write(background_js)
+    
+    std_logger.info(f"✅ 代理认证插件创建成功: {plugin_path}")
+    return plugin_path
+
+def setup_proxy():
+    """
+    配置代理设置
+    支持两种格式:
+    1. 带认证: http://username:password@host:port
+    2. 不带认证: http://host:port
+    """
+    global options
+    
+    if not chrome_proxy:
+        std_logger.info("未检测到代理配置，直接启动浏览器")
+        return None
+    
+    # 检查代理可用性
+    pava = is_proxy_available(chrome_proxy)
+    if not pava:
+        error_exit("❌ 指定代理不可用，为了保证账号安全退出不进入下一步操作。")
+    
+    std_logger.info(f"✅ 代理可用: {chrome_proxy}")
+    
+    # 解析代理URL
+    scheme, username, password, host, port = parse_proxy_url(chrome_proxy)
+    
+    if not host or not port:
+        std_logger.error("❌ 代理URL格式错误")
+        return None
+    
+    # 判断是否需要认证
+    if username and password:
+        std_logger.info("✅ 检测到代理认证信息，使用扩展插件方式")
+        # 创建代理认证扩展
+        plugin_path = create_proxy_auth_extension(
+            proxy_host=host,
+            proxy_port=port,
+            proxy_username=username,
+            proxy_password=password,
+            scheme=scheme
+        )
+        return plugin_path
+    else:
+        std_logger.info("✅ 无认证代理，添加到启动参数")
+        # 直接使用命令行参数设置代理
+        options.set_argument(f'--proxy-server={scheme}://{host}:{port}')
+        return None
         
 async def is_page_crashed(browser):
     async def check_title():
