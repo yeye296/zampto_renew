@@ -246,7 +246,10 @@ def setup(user_agent: str, user_data_path: str = None):
     """
     初始化浏览器
     
-    ⚠️ 重要：使用代理认证时，不要使用 incognito(True)
+    ⚠️ 重要改动：
+    1. 移除了 --guest 参数（会阻止扩展加载）
+    2. 添加了扩展加载相关参数
+    3. 不使用 incognito 模式（扩展在隐身模式下不工作）
     """
     global options
     global page, browser
@@ -254,13 +257,15 @@ def setup(user_agent: str, user_data_path: str = None):
     options = (
         ChromiumOptions()
         .set_user_agent(user_agent)
-        .set_argument('--guest')
         .set_argument('--no-sandbox')
         .set_argument('--disable-gpu')
+        .set_argument('--disable-dev-shm-usage')
         .set_argument('--window-size=1280,800')
         .set_argument('--remote-debugging-port=9222')
         .set_browser_path(binpath)
     )
+    
+    # ⚠️ 重要：不要添加 --guest 参数（代理认证模式下）
     
     # 无头模式配置
     if 'DISPLAY' not in os.environ:
@@ -271,28 +276,46 @@ def setup(user_agent: str, user_data_path: str = None):
         options.headless(False)
         std_logger.info("✅ 浏览器使用正常模式")
     
-    # ⚠️ 关键修复：配置代理（先设置，再获取插件路径）
+    # 配置代理
     plugin_path = setup_proxy()
     
     # 如果有代理认证插件，加载它
     if plugin_path:
-        # 使用正确的方式加载扩展
-        options.add_extension(path=plugin_path)
-        std_logger.info("✅ 代理认证扩展已加载")
+        std_logger.info(f"正在加载扩展: {plugin_path}")
         
-        # 代理认证模式下，不要接管已有浏览器，必须启动新浏览器
-        std_logger.info("⚠️ 使用代理认证时，将启动全新浏览器实例")
+        # 确保扩展文件存在
+        manifest_file = os.path.join(plugin_path, "manifest.json")
+        background_file = os.path.join(plugin_path, "background.js")
+        
+        if not os.path.exists(manifest_file) or not os.path.exists(background_file):
+            std_logger.error(f"❌ 扩展文件不完整")
+            return
+        
+        # ⚠️ 关键修复：使用正确的方式加载扩展
+        options.add_extension(path=plugin_path)
+        options.set_argument(f'--load-extension={plugin_path}')
+        options.set_argument(f'--disable-extensions-except={plugin_path}')
+        options.set_argument('--allow-file-access-from-files')
+        
+        std_logger.info("✅ 代理认证扩展已配置")
+        
+        # 代理认证模式下，必须启动新浏览器
+        std_logger.info("⚠️ 代理认证模式：启动全新浏览器实例（不接管已有浏览器）")
         
         if user_data_path:
             std_logger.warning("⚠️ 代理认证模式下不建议使用 user_data_path")
         
         # 直接启动新浏览器
+        std_logger.info("正在启动浏览器...")
         browser = Chromium(options)
-        std_logger.info("✅ 浏览器启动成功（代理认证模式）")
+        std_logger.info("✅ 浏览器启动成功")
+        
     else:
-        # 无代理认证，可以正常设置 user_data_path 并尝试接管
+        # 无代理认证，可以正常使用
         if user_data_path:
             options.set_user_data_path(user_data_path)
+        
+        options.set_argument('--guest')
         
         # 尝试接管已有浏览器
         browser = attach_browser()
@@ -304,163 +327,65 @@ def setup(user_agent: str, user_data_path: str = None):
     # 获取当前激活的标签页
     page = browser.latest_tab
     
+    # 查看扩展是否创建成功
+    plugin_path = os.path.join('/tmp', 'drission_proxy_auth')
+    print(f"扩展目录: {plugin_path}")
+    print(f"manifest.json 存在: {os.path.exists(os.path.join(plugin_path, 'manifest.json'))}")
+    print(f"background.js 存在: {os.path.exists(os.path.join(plugin_path, 'background.js'))}")
     # 验证提示
     if chrome_proxy:
-        verify_proxy_with_debug(page)
+        verify_proxy_simple(page)
     exit(1)
 
-def verify_proxy_with_debug(page):
+def verify_proxy_simple(page):
     """
-    带调试信息的代理验证函数
+    简单快速的代理验证函数
     """
-    print("=" * 70)
-    print("🔍 开始验证代理配置")
+    print("\n" + "=" * 70)
+    print("🔍 验证代理IP")
     print("=" * 70)
     
-    # 测试1：检查页面加载状态
-    print("\n[测试1] 访问 httpbin.org/ip (5秒超时)")
     try:
-        page.get('https://httpbin.org/ip', timeout=5)
+        print("\n正在访问 ifconfig.me ...")
+        page.get('https://ifconfig.me', timeout=20)
         
         # 等待页面加载
-        time.sleep(2)
+        time.sleep(5)
         
-        # 检查页面状态
-        print(f"  - 当前URL: {page.url}")
-        print(f"  - 页面标题: {page.title}")
-        print(f"  - HTML长度: {len(page.html)}")
+        # 获取页面内容
+        print(f"页面URL: {page.url}")
+        print(f"页面HTML长度: {len(page.html)}")
         
-        # 尝试获取内容
-        if len(page.html) > 100:
-            body_text = page.ele('tag:body').text if page.ele('tag:body') else "无法获取body"
-            print(f"  - Body内容: {body_text[:200]}")
-        else:
-            print(f"  ❌ 页面内容为空或太短")
-            print(f"  - 完整HTML: {page.html}")
+        # 尝试获取IP
+        body_elem = page.ele('tag:body')
+        if body_elem and body_elem.text:
+            ip = body_elem.text.strip()
+            print(f"\n✅✅✅ 当前IP: {ip}")
             
-    except Exception as e:
-        print(f"  ❌ 访问失败: {e}")
-    
-    # 测试2：访问纯文本IP网站
-    print("\n[测试2] 访问 ifconfig.me (10秒超时)")
-    try:
-        page.get('https://ifconfig.me', timeout=10)
-        time.sleep(3)  # 等待页面完全加载
-        
-        print(f"  - 当前URL: {page.url}")
-        print(f"  - 页面标题: {page.title}")
-        
-        # 尝试多种方式获取IP
-        html_content = page.html
-        print(f"  - HTML长度: {len(html_content)}")
-        
-        if len(html_content) > 50:
-            # 方式1：获取body文本
-            body_elem = page.ele('tag:body')
-            if body_elem:
-                ip = body_elem.text.strip()
-                print(f"  ✅ 检测到IP: {ip}")
-                
-                # 判断是否是代理IP
-                if ip and len(ip) < 50:  # IP地址不会太长
-                    print(f"\n{'='*70}")
-                    print(f"  🎉 当前IP地址: {ip}")
-                    print(f"{'='*70}")
-                    
-                    # 检查是否是越南IP（代理在越南）
-                    if 'vn' in page.url.lower() or '越南' in html_content:
-                        print(f"  ✅ 代理可能已生效（越南节点）")
-                    else:
-                        print(f"  ⚠️ 请手动确认此IP是否为代理IP")
-                else:
-                    print(f"  ⚠️ 获取的内容不像IP地址: {ip[:100]}")
-        else:
-            print(f"  ❌ 页面加载失败，HTML为空")
-            
-    except Exception as e:
-        print(f"  ❌ 访问失败: {e}")
-    
-    # 测试3：访问可视化IP查询网站
-    print("\n[测试3] 访问 ip-api.com (详细信息)")
-    try:
-        page.get('http://ip-api.com/json/', timeout=10)
-        time.sleep(2)
-        
-        print(f"  - 当前URL: {page.url}")
-        body_text = page.ele('tag:body').text if page.ele('tag:body') else ""
-        
-        if body_text:
-            print(f"  - 响应内容: {body_text[:500]}")
-            
-            # 解析JSON
-            import json
-            try:
-                data = json.loads(body_text)
-                print(f"\n  {'='*60}")
-                print(f"  IP地址: {data.get('query', 'N/A')}")
-                print(f"  国家: {data.get('country', 'N/A')}")
-                print(f"  城市: {data.get('city', 'N/A')}")
-                print(f"  ISP: {data.get('isp', 'N/A')}")
-                print(f"  {'='*60}")
-                
-                # 检查是否是越南
-                if data.get('countryCode') == 'VN':
-                    print(f"  ✅✅✅ 代理已生效！当前使用越南IP")
-                else:
-                    print(f"  ❌ 代理未生效，当前不是越南IP")
-                    
-            except json.JSONDecodeError:
-                print(f"  ⚠️ 无法解析JSON响应")
-        else:
-            print(f"  ❌ 无响应内容")
-            
-    except Exception as e:
-        print(f"  ❌ 访问失败: {e}")
-    
-    # 测试4：检查浏览器控制台错误
-    print("\n[测试4] 检查浏览器控制台")
-    try:
-        # 获取浏览器日志（如果支持）
-        print("  - 提示: 如果非无头模式，请查看浏览器控制台(F12)是否有错误")
-        print("  - 查看 chrome://extensions 确认扩展是否加载")
-        print("  - 查看网络面板(Network)确认请求是否通过代理")
-    except Exception as e:
-        print(f"  ⚠️ {e}")
-    
-    # 测试5：直接测试代理连接
-    print("\n[测试5] 使用 requests 直接测试代理")
-    try:
-        import requests
-        proxy_url = os.getenv('CHROME_PROXY')
-        if proxy_url:
-            proxies = {
-                'http': proxy_url,
-                'https': proxy_url
-            }
-            
-            print(f"  - 代理地址: {mask_sensitive_info(proxy_url)}")
-            response = requests.get('https://api.ipify.org', 
-                                   proxies=proxies, 
-                                   timeout=10)
-            
-            if response.status_code == 200:
-                proxy_ip = response.text.strip()
-                print(f"  ✅ 代理本身可用，IP: {proxy_ip}")
-                print(f"  ⚠️ 但浏览器可能没有使用代理！")
+            # 验证是否是代理IP
+            if ip == "103.137.185.66":
+                print(f"✅✅✅ 代理已生效！（越南代理IP）")
             else:
-                print(f"  ❌ 代理响应异常: {response.status_code}")
+                print(f"⚠️ 这个IP不是预期的代理IP (103.137.185.66)")
+            
+            return ip
+        else:
+            print(f"\n❌ 无法获取IP")
+            print(f"完整HTML: {page.html[:500]}")
+            
+            # 尝试其他方式
+            print("\n尝试访问 api.ipify.org ...")
+            page.get('https://api.ipify.org', timeout=20)
+            time.sleep(3)
+            body_elem = page.ele('tag:body')
+            if body_elem and body_elem.text:
+                ip = body_elem.text.strip()
+                print(f"✅ 当前IP: {ip}")
+                return ip
+            
     except Exception as e:
-        print(f"  ❌ 代理测试失败: {e}")
-        print(f"  ⚠️ 这说明代理本身可能有问题")
+        print(f"\n❌ 验证失败: {e}")
     
-    print("\n" + "=" * 70)
-    print("🔍 诊断建议:")
-    print("=" * 70)
-    print("1. 如果所有测试都失败 → 代理服务器可能无法访问")
-    print("2. 如果 requests 成功但浏览器失败 → 扩展配置有问题")
-    print("3. 如果显示的不是越南IP → 代理未生效")
-    print("4. 尝试关闭无头模式查看浏览器实际行为")
-    print("5. 检查是否有防火墙阻止代理连接")
     print("=" * 70)
 
 @require_browser_alive
@@ -536,57 +461,101 @@ def parse_proxy_url(proxy_url):
 
 def create_proxy_auth_extension(proxy_username, proxy_password, plugin_path=None):
     """
-    创建Chrome代理认证扩展插件（只处理认证，不设置代理地址）
+    创建Chrome代理认证扩展插件
     
-    ⚠️ 关键：此扩展只处理代理认证，代理地址通过命令行参数设置
+    ⚠️ 关键：此扩展只处理认证，代理地址通过命令行参数设置
     """
     if plugin_path is None:
         plugin_path = os.path.join(tempfile.gettempdir(), 'drission_proxy_auth')
     
+    # 确保目录存在且为空
+    if os.path.exists(plugin_path):
+        import shutil
+        shutil.rmtree(plugin_path)
+    os.makedirs(plugin_path, exist_ok=True)
+    
     # Manifest V2 配置
-    manifest_json = """
-{
-    "version": "1.0.0",
+    manifest_json = """{
     "manifest_version": 2,
-    "name": "Proxy Authentication",
+    "name": "Proxy Authentication Helper",
+    "version": "1.0.0",
+    "description": "Auto-fill proxy authentication credentials",
     "permissions": [
         "webRequest",
         "webRequestBlocking",
         "<all_urls>"
     ],
     "background": {
-        "scripts": ["background.js"]
+        "scripts": ["background.js"],
+        "persistent": true
     },
     "minimum_chrome_version": "22.0.0"
-}
-"""
+}"""
     
     # JavaScript字符串转义
-    escaped_password = proxy_password.replace('\\', '\\\\').replace('"', '\\"').replace("'", "\\'")
-    escaped_username = proxy_username.replace('\\', '\\\\').replace('"', '\\"').replace("'", "\\'")
+    escaped_password = proxy_password.replace('\\', '\\\\').replace('"', '\\"').replace("'", "\\'").replace('\n', '\\n')
+    escaped_username = proxy_username.replace('\\', '\\\\').replace('"', '\\"').replace("'", "\\'").replace('\n', '\\n')
     
-    # background.js - 只处理认证，不设置代理
+    # background.js - 处理代理认证
     background_js = f"""
-// 代理认证处理
+console.log('=================================================');
+console.log('🔌 Proxy Authentication Extension Loading...');
+console.log('=================================================');
+
+var authAttempts = 0;
+var MAX_AUTH_ATTEMPTS = 3;
+
+// 监听代理认证请求
 chrome.webRequest.onAuthRequired.addListener(
-    function(details) {{
-        console.log('🔐 代理认证请求:', details.url);
-        return {{
-            authCredentials: {{
-                username: "{escaped_username}",
-                password: "{escaped_password}"
-            }}
+    function(details, callback) {{
+        authAttempts++;
+        
+        console.log('🔐 Proxy Authentication Required');
+        console.log('  - URL: ' + details.url);
+        console.log('  - Attempt: ' + authAttempts + '/' + MAX_AUTH_ATTEMPTS);
+        
+        if (authAttempts > MAX_AUTH_ATTEMPTS) {{
+            console.error('❌ Max authentication attempts reached!');
+            callback({{cancel: true}});
+            return {{cancel: true}};
+        }}
+        
+        var credentials = {{
+            username: "{escaped_username}",
+            password: "{escaped_password}"
         }};
+        
+        console.log('✅ Providing credentials...');
+        
+        callback({{authCredentials: credentials}});
+        return {{authCredentials: credentials}};
     }},
     {{urls: ["<all_urls>"]}},
     ['blocking']
 );
 
-console.log('✅ 代理认证扩展已加载');
+// 监听请求完成
+chrome.webRequest.onCompleted.addListener(
+    function(details) {{
+        if (details.statusCode === 200) {{
+            console.log('✅ Request successful: ' + details.url);
+        }}
+    }},
+    {{urls: ["<all_urls>"]}}
+);
+
+// 监听请求错误
+chrome.webRequest.onErrorOccurred.addListener(
+    function(details) {{
+        console.error('❌ Request failed: ' + details.url);
+        console.error('  - Error: ' + details.error);
+    }},
+    {{urls: ["<all_urls>"]}}
+);
+
+console.log('✅ Proxy Authentication Extension Loaded Successfully');
+console.log('=================================================');
 """
-    
-    # 创建插件目录
-    os.makedirs(plugin_path, exist_ok=True)
     
     # 写入文件
     with open(os.path.join(plugin_path, "manifest.json"), "w", encoding='utf-8') as f:
@@ -594,6 +563,12 @@ console.log('✅ 代理认证扩展已加载');
     
     with open(os.path.join(plugin_path, "background.js"), "w", encoding='utf-8') as f:
         f.write(background_js)
+    
+    # 创建一个简单的图标
+    import base64
+    icon_data = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==')
+    with open(os.path.join(plugin_path, "icon.png"), "wb") as f:
+        f.write(icon_data)
     
     std_logger.info(f"✅ 代理认证插件创建成功: {plugin_path}")
     return plugin_path
@@ -603,9 +578,10 @@ def setup_proxy():
     """
     配置代理设置
     
-    ⚠️ 新方案：
-    1. 通过 --proxy-server 命令行参数设置代理地址（这样代理才会真正生效）
+    ⚠️ 关键修复：
+    1. 通过命令行参数设置代理服务器
     2. 通过扩展处理认证
+    3. 添加必要的Chrome启动参数
     """
     global options
     
@@ -630,10 +606,16 @@ def setup_proxy():
         std_logger.error("❌ 代理URL格式错误")
         return None
     
-    # ⚠️ 关键改变：无论是否有认证，都通过命令行参数设置代理
+    # ⚠️ 关键：设置代理服务器（命令行参数）
     proxy_server = f"{scheme}://{host}:{port}"
+    
+    # 设置代理相关参数
     options.set_argument(f'--proxy-server={proxy_server}')
-    std_logger.info(f"✅ 代理地址已设置（命令行参数）: {host}:{port}")
+    options.set_argument('--proxy-bypass-list=localhost;127.0.0.1')
+    options.set_argument('--ignore-certificate-errors')
+    options.set_argument('--ignore-ssl-errors')
+    
+    std_logger.info(f"✅ 代理服务器已设置: {host}:{port}")
     
     # 如果有认证信息，创建认证扩展
     if username and password:
