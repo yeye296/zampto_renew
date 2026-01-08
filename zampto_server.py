@@ -328,6 +328,7 @@ def verify_proxy_simple(page):
             page.get(url, timeout=15, retry=1)
             
             # 等待一小会儿确保内容渲染（虽然这些API通常是纯文本）
+            import time
             time.sleep(2)
             
             # 检查页面状态
