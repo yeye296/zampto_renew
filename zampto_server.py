@@ -19,6 +19,7 @@ import string
 import tempfile
 import urllib.parse
 import re
+import time
 
 def signal_handler(sig, frame):
     print("\n捕捉到 Ctrl+C，正在退出...")
@@ -305,30 +306,162 @@ def setup(user_agent: str, user_data_path: str = None):
     
     # 验证提示
     if chrome_proxy:
-        std_logger.info("=" * 60)
-        # 方法1：访问纯文本IP网站
-        page.get('https://api.ipify.org')
-        ip_text = page.ele('tag:body').text  # 获取 body 元素的文本
-        print(f"当前IP: {ip_text}")
-
-        # 方法2：访问JSON API
-        page.get('https://httpbin.org/ip')
-        ip_info = page.ele('tag:body').text  # 获取JSON文本
-        print(f"IP信息: {ip_info}")
-
-        # 方法3：访问HTML网站
-        page.get('https://ip.sb')
-        print(f"页面内容: {page.html}")  # 查看完整HTML
-        # 或者只获取IP文本
-        ip_element = page.ele('tag:pre')  # ip.sb 的IP显示在 pre 标签中
-        if ip_element:
-            print(f"当前IP: {ip_element.text}")
-
-        # 方法4：最简单 - 访问 ifconfig.me
-        page.get('https://ifconfig.me')
-        print(f"当前IP: {page.ele('tag:body').text}")
-        std_logger.info("=" * 60)
+        verify_proxy_with_debug(page)
     exit(1)
+
+def verify_proxy_with_debug(page):
+    """
+    带调试信息的代理验证函数
+    """
+    print("=" * 70)
+    print("🔍 开始验证代理配置")
+    print("=" * 70)
+    
+    # 测试1：检查页面加载状态
+    print("\n[测试1] 访问 httpbin.org/ip (5秒超时)")
+    try:
+        page.get('https://httpbin.org/ip', timeout=5)
+        
+        # 等待页面加载
+        time.sleep(2)
+        
+        # 检查页面状态
+        print(f"  - 当前URL: {page.url}")
+        print(f"  - 页面标题: {page.title}")
+        print(f"  - HTML长度: {len(page.html)}")
+        
+        # 尝试获取内容
+        if len(page.html) > 100:
+            body_text = page.ele('tag:body').text if page.ele('tag:body') else "无法获取body"
+            print(f"  - Body内容: {body_text[:200]}")
+        else:
+            print(f"  ❌ 页面内容为空或太短")
+            print(f"  - 完整HTML: {page.html}")
+            
+    except Exception as e:
+        print(f"  ❌ 访问失败: {e}")
+    
+    # 测试2：访问纯文本IP网站
+    print("\n[测试2] 访问 ifconfig.me (10秒超时)")
+    try:
+        page.get('https://ifconfig.me', timeout=10)
+        time.sleep(3)  # 等待页面完全加载
+        
+        print(f"  - 当前URL: {page.url}")
+        print(f"  - 页面标题: {page.title}")
+        
+        # 尝试多种方式获取IP
+        html_content = page.html
+        print(f"  - HTML长度: {len(html_content)}")
+        
+        if len(html_content) > 50:
+            # 方式1：获取body文本
+            body_elem = page.ele('tag:body')
+            if body_elem:
+                ip = body_elem.text.strip()
+                print(f"  ✅ 检测到IP: {ip}")
+                
+                # 判断是否是代理IP
+                if ip and len(ip) < 50:  # IP地址不会太长
+                    print(f"\n{'='*70}")
+                    print(f"  🎉 当前IP地址: {ip}")
+                    print(f"{'='*70}")
+                    
+                    # 检查是否是越南IP（代理在越南）
+                    if 'vn' in page.url.lower() or '越南' in html_content:
+                        print(f"  ✅ 代理可能已生效（越南节点）")
+                    else:
+                        print(f"  ⚠️ 请手动确认此IP是否为代理IP")
+                else:
+                    print(f"  ⚠️ 获取的内容不像IP地址: {ip[:100]}")
+        else:
+            print(f"  ❌ 页面加载失败，HTML为空")
+            
+    except Exception as e:
+        print(f"  ❌ 访问失败: {e}")
+    
+    # 测试3：访问可视化IP查询网站
+    print("\n[测试3] 访问 ip-api.com (详细信息)")
+    try:
+        page.get('http://ip-api.com/json/', timeout=10)
+        time.sleep(2)
+        
+        print(f"  - 当前URL: {page.url}")
+        body_text = page.ele('tag:body').text if page.ele('tag:body') else ""
+        
+        if body_text:
+            print(f"  - 响应内容: {body_text[:500]}")
+            
+            # 解析JSON
+            import json
+            try:
+                data = json.loads(body_text)
+                print(f"\n  {'='*60}")
+                print(f"  IP地址: {data.get('query', 'N/A')}")
+                print(f"  国家: {data.get('country', 'N/A')}")
+                print(f"  城市: {data.get('city', 'N/A')}")
+                print(f"  ISP: {data.get('isp', 'N/A')}")
+                print(f"  {'='*60}")
+                
+                # 检查是否是越南
+                if data.get('countryCode') == 'VN':
+                    print(f"  ✅✅✅ 代理已生效！当前使用越南IP")
+                else:
+                    print(f"  ❌ 代理未生效，当前不是越南IP")
+                    
+            except json.JSONDecodeError:
+                print(f"  ⚠️ 无法解析JSON响应")
+        else:
+            print(f"  ❌ 无响应内容")
+            
+    except Exception as e:
+        print(f"  ❌ 访问失败: {e}")
+    
+    # 测试4：检查浏览器控制台错误
+    print("\n[测试4] 检查浏览器控制台")
+    try:
+        # 获取浏览器日志（如果支持）
+        print("  - 提示: 如果非无头模式，请查看浏览器控制台(F12)是否有错误")
+        print("  - 查看 chrome://extensions 确认扩展是否加载")
+        print("  - 查看网络面板(Network)确认请求是否通过代理")
+    except Exception as e:
+        print(f"  ⚠️ {e}")
+    
+    # 测试5：直接测试代理连接
+    print("\n[测试5] 使用 requests 直接测试代理")
+    try:
+        import requests
+        proxy_url = os.getenv('CHROME_PROXY')
+        if proxy_url:
+            proxies = {
+                'http': proxy_url,
+                'https': proxy_url
+            }
+            
+            print(f"  - 代理地址: {mask_sensitive_info(proxy_url)}")
+            response = requests.get('https://api.ipify.org', 
+                                   proxies=proxies, 
+                                   timeout=10)
+            
+            if response.status_code == 200:
+                proxy_ip = response.text.strip()
+                print(f"  ✅ 代理本身可用，IP: {proxy_ip}")
+                print(f"  ⚠️ 但浏览器可能没有使用代理！")
+            else:
+                print(f"  ❌ 代理响应异常: {response.status_code}")
+    except Exception as e:
+        print(f"  ❌ 代理测试失败: {e}")
+        print(f"  ⚠️ 这说明代理本身可能有问题")
+    
+    print("\n" + "=" * 70)
+    print("🔍 诊断建议:")
+    print("=" * 70)
+    print("1. 如果所有测试都失败 → 代理服务器可能无法访问")
+    print("2. 如果 requests 成功但浏览器失败 → 扩展配置有问题")
+    print("3. 如果显示的不是越南IP → 代理未生效")
+    print("4. 尝试关闭无头模式查看浏览器实际行为")
+    print("5. 检查是否有防火墙阻止代理连接")
+    print("=" * 70)
 
 @require_browser_alive
 async def test():
