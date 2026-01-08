@@ -15,6 +15,7 @@ import argparse
 import socket
 import zipfile
 import json
+import shutil
 
 def signal_handler(sig, frame):
     print("\n捕捉到 Ctrl+C，正在退出...")
@@ -242,7 +243,7 @@ def setup(user_agent: str, user_data_path: str = None):
     global page,browser
     options = (
         ChromiumOptions()
-        .incognito(True)
+        # .incognito(True)
         .set_user_agent(user_agent)
         .set_argument('--guest')
         .set_argument('--no-sandbox')
@@ -306,44 +307,49 @@ def setup_proxy():
 
     # 1. 解析代理字符串 (http://user:pass@ip:port)
     try:
-        # 去掉协议头
-        proxy_str = chrome_proxy.replace('http://', '').replace('https://', '')
+        # 兼容 http:// 和无协议头的情况
+        proxy_clean = chrome_proxy.replace('http://', '').replace('https://', '')
         
-        if '@' in proxy_str:
-            auth_part, ip_part = proxy_str.rsplit('@', 1)
+        if '@' in proxy_clean:
+            auth_part, ip_part = proxy_clean.rsplit('@', 1)
             username, password = auth_part.split(':', 1)
             ip, port = ip_part.split(':')
             
-            # 【关键修改 1】使用原生参数设置代理服务器地址
-            # 这比插件设置更稳定，确保一开始就走代理
+            # 【核心策略 1】使用命令行参数强制流量走代理服务器
+            # 这样可以防止插件加载延迟导致的直连漏网之鱼
             options.set_argument(f'--proxy-server=http://{ip}:{port}')
             
             std_logger.info("✅ 检测到认证代理，已配置连接参数与认证插件")
         else:
-            # 无账号密码情况
+            # 无账号密码情况，直接设置参数即可
             options.set_argument(f'--proxy-server={chrome_proxy}')
             std_logger.info("✅ 检测到普通代理，已配置连接参数")
             return
 
     except Exception as e:
-        # 隐私保护：报错时不打印原始字符串
         error_exit(f"❌ 代理配置解析异常，请检查格式")
         return
 
-    # 2. 定义插件文件夹路径
+    # 2. 定义插件文件夹路径 (使用绝对路径)
     plugin_path = os.path.abspath("proxy_auth_plugin")
-    if not os.path.exists(plugin_path):
-        os.makedirs(plugin_path)
+    
+    # 清理旧的插件文件夹，防止残留文件干扰
+    if os.path.exists(plugin_path):
+        shutil.rmtree(plugin_path)
+    os.makedirs(plugin_path)
 
-    # 3. 准备文件内容
-    # Manifest V2 (依然是自动化测试中最稳定的版本)
+    # 3. 准备 Manifest.json (Manifest V2)
+    # 這是目前 Headless 模式下最稳定的版本
     manifest_json = """
     {
         "version": "1.0.0",
         "manifest_version": 2,
         "name": "Chrome Proxy Auth",
         "permissions": [
+            "proxy",
             "tabs",
+            "unlimitedStorage",
+            "storage",
             "<all_urls>",
             "webRequest",
             "webRequestBlocking"
@@ -355,9 +361,24 @@ def setup_proxy():
     }
     """
 
-    # 【关键修改 2】background.js 只负责填密码，不负责设置 IP
-    # 这样避免了插件设置代理失败导致直连的问题
+    # 4. 准备 background.js
+    # 仅负责监听认证请求并填入密码
     background_js = """
+    var config = {
+            mode: "fixed_servers",
+            rules: {
+              singleProxy: {
+                scheme: "http",
+                host: "%s",
+                port: parseInt(%s)
+              },
+              bypassList: ["localhost"]
+            }
+          };
+
+    // 虽然命令行设置了代理，但插件再次设置可以确保双重保险
+    chrome.proxy.settings.set({value: config, scope: "regular"}, function() {});
+
     function callbackFn(details) {
         return {
             authCredentials: {
@@ -372,9 +393,9 @@ def setup_proxy():
                 {urls: ["<all_urls>"]},
                 ['blocking']
     );
-    """ % (json.dumps(username), json.dumps(password))
+    """ % (ip, port, json.dumps(username), json.dumps(password))
 
-    # 4. 写入插件文件
+    # 5. 写入文件
     try:
         with open(os.path.join(plugin_path, "manifest.json"), 'w', encoding='utf-8') as f:
             f.write(manifest_json)
@@ -382,7 +403,7 @@ def setup_proxy():
         with open(os.path.join(plugin_path, "background.js"), 'w', encoding='utf-8') as f:
             f.write(background_js)
         
-        # 5. 加载插件
+        # 6. 加载插件
         options.add_extension(plugin_path)
         
     except Exception as e:
