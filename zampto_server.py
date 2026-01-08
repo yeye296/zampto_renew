@@ -303,68 +303,91 @@ def setup(user_agent: str, user_data_path: str = None):
     # 获取当前激活的标签页
     page = browser.latest_tab
     verify_proxy_simple(page)
-    exit(1)
 
 def verify_proxy_simple(page):
     """
-    简单快速的代理验证函数
+    通用的代理验证函数
+    原理：先获取本机直连IP，再获取浏览器IP，两者不同则视为代理生效
     """
     print("\n" + "=" * 70)
-    print("🔍 验证代理IP")
+    print("🔍 开始验证代理可用性")
     print("=" * 70)
-    
-    # 列表中的API都尝试一下，有的可能在GitHub Action环境中被墙或限流
+    import re
+    import time
+    from urllib.request import urlopen, Request
+    # 定义 IP 查询 API 列表 (支持 HTTPS 以防止被中间人劫持)
     ip_apis = [
-        'https://api.ipify.org',
-        'https://icanhazip.com',
-        'https://ifconfig.me/ip',
-        'http://checkip.amazonaws.com'
+        'https://api.ipify.org',       # 纯文本
+        'https://ifconfig.me/ip',      # 纯文本
+        'https://icanhazip.com',       # 纯文本
+        'https://checkip.amazonaws.com' # 纯文本
     ]
+    
+    # --- 第一步：获取本机直连 IP (作为参照物) ---
+    direct_ip = None
+    print("⏳ 正在获取本机直连 IP (用于对比)...")
+    try:
+        # 使用原生 urllib 发送无代理请求，设置 5 秒超时
+        # 注意：这里不使用代理，直接走 GitHub Runner 的网络
+        req = Request(ip_apis[0], headers={'User-Agent': 'curl/7.64.1'})
+        with urlopen(req, timeout=5) as response:
+            direct_ip = response.read().decode('utf-8').strip()
+        print(f"🏠 本机直连 IP: {direct_ip}")
+    except Exception as e:
+        print(f"⚠️ 无法获取直连 IP (不影响后续检查): {e}")
+
+    # --- 第二步：通过浏览器获取代理 IP ---
+    browser_ip = None
     
     for url in ip_apis:
         try:
-            print(f"\n尝试访问 {url} ...")
-            # 缩短超时时间，快速失败切换
-            page.get(url, timeout=15, retry=1)
+            print(f"\n🌐 尝试通过浏览器代理访问: {url}")
             
-            # 等待一小会儿确保内容渲染（虽然这些API通常是纯文本）
-            import time
+            # 访问页面，超时时间 20s
+            page.get(url, timeout=20, retry=1)
+            
+            # 稍微等待渲染
             time.sleep(2)
             
-            # 检查页面状态
-            # DrissionPage 这里的 html 属性如果为空，说明加载彻底失败
-            html_content = page.html
-            body_text = page.ele('tag:body').text if page.ele('tag:body') else ""
+            # 获取页面内容 (优先取 body 文本，其次取 raw html)
+            content = page.ele('tag:body').text if page.ele('tag:body') else page.html
             
-            print(f"URL: {page.url}")
-            
-            # 优先使用 body text，如果为空则检查 raw html
-            content = body_text.strip() if body_text else html_content.strip()
-            
-            # 简单的IP格式校验 (IPv4)
-            import re
+            # 使用正则提取 IPv4 地址
+            # 这个正则可以从 JSON {"ip": "1.2.3.4"} 或 HTML <body>1.2.3.4</body> 中提取
             ip_pattern = r'\b(?:\d{1,3}\.){3}\d{1,3}\b'
             match = re.search(ip_pattern, content)
             
             if match:
-                ip = match.group(0)
-                print(f"✅✅✅ 获取到当前IP: {ip}")
+                browser_ip = match.group(0)
+                print(f"🔎 浏览器获取 IP: {browser_ip}")
                 
-                # 验证是否是代理IP
-                # 注意：这里建议不要写死IP，只要能获取到IP且不是GitHub Runner的IP就算成功
-                if "103.137.185.66" in ip: 
-                    print(f"✅ 目标代理IP匹配成功")
-                else:
-                    print(f"⚠️ 当前IP ({ip}) 与预期代理不一致，可能是透明代理或直连")
+                # --- 第三步：核心验证逻辑 ---
+                
+                # 1. 验证是否获取到了 IP
+                if not browser_ip:
+                    print("❌ 未提取到有效 IP，重试下一个 API...")
+                    continue
+                    
+                # 2. 验证是否是直连 (代理是否生效)
+                if direct_ip and browser_ip == direct_ip:
+                    print(f"❌ 代理失效！浏览器 IP ({browser_ip}) 与 直连 IP 相同。")
+                    print("⚠️ 警告：流量正在直连，未经过代理服务器！")
+                    return False
+                
+                # 3. 验证成功
+                print("✅✅✅ 代理验证成功！")
+                print(f"   - 原始 IP: {direct_ip if direct_ip else '未知'}")
+                print(f"   - 代理 IP: {browser_ip}")
+                print("=" * 70)
                 return True
             else:
-                print(f"⚠️ 页面内容不是有效IP: {content[:100]}...")
+                print(f"⚠️ 页面内容中未找到 IP 地址: {content[:50]}...")
                 
         except Exception as e:
-            print(f"❌ 访问 {url} 失败: {e}")
+            print(f"❌ 访问失败 ({url}): {e}")
             continue
             
-    print("\n❌ 所有IP API验证均失败，代理可能未生效或网络不通")
+    print("\n❌ 所有 API 验证失败，代理不可用或网络超时")
     print("=" * 70)
     return False
 
