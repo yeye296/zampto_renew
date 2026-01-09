@@ -302,7 +302,7 @@ def setup(user_agent: str, user_data_path: str = None):
 
     # 获取当前激活的标签页
     page = browser.latest_tab
-    verify_proxy_simple(page)
+    # verify_proxy_simple(page)
 
 def verify_proxy_simple(page):
     """
